@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "line-chat-downloader",
-  "description": "line chat history downloader",
-  "version": "1.0",
+  "name": "LINE chat archive",
+  "description": "Export LINE Official Account chat history to a zip, with progress and retries.",
+  "version": "2.0",
   "action": {
     "default_popup": "popup/popup.html"
   },

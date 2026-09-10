@@ -2,26 +2,55 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Line Bot Chat History Downloader</title>
-    <link rel="stylesheet" href="font-awesome/css/font-awesome.min.css" />
+    <title>LINE chat archive</title>
     <link href="css/style.css" rel="stylesheet" />
   </head>
   <body>
-    <div id="menu">
-      <div className="select">
-        <h4>Start Date</h4>
-        <input type="date" id="start" />
-        <h4>End Date</h4>
-        <input type="date" id="end" />
-      </div>
+    <main class="shell">
+      <header class="head">
+        <p class="eyebrow">LINE chat archive</p>
+        <p class="subject" id="subject">Checking this tab…</p>
+        <span class="chip" id="chip" data-phase="idle">Idle</span>
+      </header>
 
-      <button id="download" class="download-btn btn">
-        <i class="fa fa-download" aria-hidden="true"></i>
-        <span>Dwonload ZIP</span>
-      </button>
-    </div>
-    <h4 id="message" style="display: none">Not in https://chat.line.biz/</h4>
+      <section class="setup" id="setup">
+        <div class="dates">
+          <label class="field">
+            <span>From</span>
+            <input type="date" id="start" />
+          </label>
+          <label class="field">
+            <span>To</span>
+            <input type="date" id="end" />
+          </label>
+        </div>
+        <p class="hint">Leave a box empty for no limit. Both dates count in full.</p>
+        <button type="button" class="primary" id="build">Build archive</button>
+      </section>
+
+      <section class="run" id="run" hidden>
+        <div class="meter" id="meter">
+          <div class="fill" id="fill"></div>
+        </div>
+
+        <dl class="counts">
+          <div><dt>Chats</dt><dd id="count-chats">0 / 0</dd></div>
+          <div><dt>Messages</dt><dd id="count-messages">0</dd></div>
+          <div><dt>Files</dt><dd id="count-files">0</dd></div>
+          <div><dt>Elapsed</dt><dd id="count-time">0:00</dd></div>
+        </dl>
+
+        <p class="retry" id="retry" hidden></p>
+
+        <ol class="ledger" id="ledger"></ol>
+        <p class="ledger-more" id="ledger-more" hidden></p>
+
+        <button type="button" class="ghost" id="stop">Stop</button>
+      </section>
+
+      <p class="note" id="note" hidden></p>
+    </main>
+
+    <script src="js/script.js"></script>
   </body>
-  <script type="text/javascript" src="js/script.js"></script>
 </html>
