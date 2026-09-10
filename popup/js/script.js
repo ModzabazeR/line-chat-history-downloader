@@ -200,6 +200,16 @@ function tick() {
 
 // ---------------------------------------------------------------- dates
 
+// Today, as the date input spells it. Built from the local parts rather than from
+// toISOString(), which would hand somebody in Bangkok yesterday's date for seven hours of
+// every day.
+function today() {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
 // Local midnight, not UTC midnight. Somebody who types 31 January means their own 31 January,
 // and the end date covers the whole of that day.
 function bound(input, endOfDay) {
@@ -243,6 +253,11 @@ chrome.runtime.onMessage.addListener((message) => {
   }
   tabId = tab.id;
   ui.subject.textContent = new URL(tab.url).pathname.split("/").filter(Boolean)[0] ?? "";
+
+  // To defaults to today, since an archive almost always runs up to now. From stays empty,
+  // which means no lower bound — there is no sensible guess for where somebody's history
+  // starts, and guessing one would quietly cut the top off their archive.
+  ui.end.value = today();
 
   const reply = await ask({ type: "archive:state" });
   if (reply?.state) render(reply.state);
