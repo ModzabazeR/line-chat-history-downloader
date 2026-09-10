@@ -338,7 +338,9 @@ button {
 }
 
 .row .mark {
-  width: 54px;
+  width: 68px;
+  flex: none;
+  white-space: nowrap; /* "retry 2/5" is two words and must not wrap onto a second line */
   text-align: right;
   font-size: 10px;
   letter-spacing: 0.06em;
