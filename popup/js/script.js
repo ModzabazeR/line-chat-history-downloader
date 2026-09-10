@@ -137,7 +137,8 @@ function render(state) {
   // A skipped attachment is worth one sentence and no alarm: the message is in the archive,
   // and only the file behind it was not there to fetch.
   const skipped = state.skipped
-    ? ` ${state.skipped} attachment${state.skipped === 1 ? "" : "s"} had no file to download.`
+    ? ` ${state.skipped} attachment${state.skipped === 1 ? "" : "s"} could not be saved; ` +
+      `the messages holding them are still in the archive.`
     : "";
 
   if (state.error) note(state.error + skipped, state.phase === "done" ? null : "halt");

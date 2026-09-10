@@ -160,17 +160,47 @@
     if (stopping) throw new Stopped();
   }
 
+  // Everything that is not chat.line.biz is fetched by the service worker instead of by this
+  // page. See scripts/background.js: the sticker CDN sends no CORS headers, so a fetch from
+  // here fails with "TypeError: Failed to fetch" however many times it is tried.
+  function crossOrigin(url) {
+    return !url.startsWith(API);
+  }
+
+  async function bridge(url) {
+    const answer = await chrome.runtime.sendMessage({ type: "archive:fetch", url });
+    if (!answer) throw new TypeError("the extension's background worker did not answer");
+    if (!answer.ok) {
+      if (answer.status) return { ok: false, status: answer.status, headers: { get: () => null } };
+      throw new TypeError(answer.error ?? "the download failed");
+    }
+    // Rebuilt here rather than sent as a blob, because a message must be JSON.
+    const raw = atob(answer.base64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+    const body = new Blob([bytes], { type: answer.type });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (name) => (name.toLowerCase() === "content-type" ? answer.type : null) },
+      blob: async () => body,
+      json: async () => JSON.parse(await body.text()),
+    };
+  }
+
   async function request(url, init = {}) {
     let attempt = 0;
     for (;;) {
       if (stopping) throw new Stopped();
       attempt += 1;
       try {
-        const response = await fetch(url, {
-          credentials: "include",
-          signal: controller?.signal,
-          ...init,
-        });
+        const response = crossOrigin(url)
+          ? await bridge(url)
+          : await fetch(url, {
+              credentials: "include",
+              signal: controller?.signal,
+              ...init,
+            });
         if (response.ok) {
           if (state.retry) {
             state.retry = null;
@@ -391,30 +421,44 @@
         const stickers = folder.folder("stickers");
         const flex = folder.folder("flex-messages");
 
-        for (const file of data.filter((i) => i.type === "media" && i.media)) {
-          media.file(file.fileName, await binary(`${CONTENT}/${botId}/${file.media}`));
-          state.files += 1;
-          row.files += 1;
+        // An attachment that will not come down is counted and passed over. It must not take
+        // the archive with it: the message is already collected, the other nine hundred chats
+        // are already read, and losing all of that over one file on a CDN is the wrong trade.
+        // Stop and a signed-out session still end the run, because neither is one bad file.
+        const attach = async (put) => {
+          try {
+            await put();
+            state.files += 1;
+            row.files += 1;
+          } catch (error) {
+            if (error instanceof Stopped) throw error;
+            if (error instanceof HttpError && error.status === 401) throw error;
+            state.skipped += 1;
+          }
           emit();
+        };
+
+        for (const file of data.filter((i) => i.type === "media" && i.media)) {
+          await attach(async () =>
+            media.file(file.fileName, await binary(`${CONTENT}/${botId}/${file.media}`)),
+          );
         }
         for (const sticker of data.filter((i) => i.type === "sticker")) {
-          stickers.file(
-            `${sticker.sticker}-${sticker.stickerResourceType}`,
-            await binary(`${STICKERS}/${sticker.sticker}/ANDROID/${sticker.stickerResourceType}`),
+          await attach(async () =>
+            stickers.file(
+              `${sticker.sticker}-${sticker.stickerResourceType}`,
+              await binary(`${STICKERS}/${sticker.sticker}/ANDROID/${sticker.stickerResourceType}`),
+            ),
           );
-          state.files += 1;
-          row.files += 1;
-          emit();
         }
         for (const item of data.filter((i) => i.type === "flex")) {
-          const body = await json(
-            `${API}/v1/bots/${botId}/messages/${chatId}/flexJson` +
-              `?timestamp=${item.timestamp}&messageId=${item.messageId}`,
-          );
-          flex.file(`${item.messageId}.json`, JSON.stringify(body));
-          state.files += 1;
-          row.files += 1;
-          emit();
+          await attach(async () => {
+            const body = await json(
+              `${API}/v1/bots/${botId}/messages/${chatId}/flexJson` +
+                `?timestamp=${item.timestamp}&messageId=${item.messageId}`,
+            );
+            flex.file(`${item.messageId}.json`, JSON.stringify(body));
+          });
         }
 
         folder.file(

@@ -46,10 +46,15 @@ function zipStub() {
 }
 
 // Loads the worker and returns its exposed surface plus the progress it broadcast.
-function load({ fetchImpl, pathname = "/Ubot0001/chat/Uchat0001" } = {}) {
+function load({ fetchImpl, pathname = "/Ubot0001/chat/Uchat0001", bridgeImpl } = {}) {
   const zip = zipStub();
   const progress = [];
   const clicks = [];
+  const bridged = [];
+
+  // What scripts/background.js answers. The default is a one-byte file.
+  const bridge =
+    bridgeImpl ?? (async () => ({ ok: true, type: "image/png", base64: btoa("x") }));
 
   const sandbox = {
     console,
@@ -57,6 +62,12 @@ function load({ fetchImpl, pathname = "/Ubot0001/chat/Uchat0001" } = {}) {
     clearTimeout,
     AbortController,
     fetch: fetchImpl,
+    atob,
+    btoa,
+    Blob,
+    Uint8Array,
+    JSON,
+    TypeError,
     JSZip: zip.jszip,
     location: { pathname },
     URL: { createObjectURL: () => "blob:x", revokeObjectURL: () => {} },
@@ -64,6 +75,10 @@ function load({ fetchImpl, pathname = "/Ubot0001/chat/Uchat0001" } = {}) {
     chrome: {
       runtime: {
         sendMessage: (message) => {
+          if (message?.type === "archive:fetch") {
+            bridged.push(message.url);
+            return Promise.resolve(bridge(message.url));
+          }
           progress.push(message.state);
           return Promise.resolve();
         },
@@ -82,7 +97,7 @@ function load({ fetchImpl, pathname = "/Ubot0001/chat/Uchat0001" } = {}) {
   archive.tuning.retryCeilingMs = 4;
   archive.tuning.paceMs = 0;
   archive.tuning.emitMs = 0;
-  return { archive, progress, zip, clicks };
+  return { archive, progress, zip, clicks, bridged };
 }
 
 const settle = async (archive, phases = ["done", "stopped", "failed"]) => {
@@ -351,6 +366,74 @@ test("an attachment with no content hash is kept as a message and not downloaded
   assert.equal(archive.state.messages, 1, "the message itself is still in the archive");
   assert.ok(!asked.some((url) => url.includes("chat-content")), "no download was attempted");
   assert.deepEqual(zip.written, ["Uchat0001/data.json"]);
+});
+
+// A conversation holding one sticker, used by the two tests below.
+const stickerChat = async (url) => {
+  if (url.includes("/chats?")) return reply(200, { list: [{ chatId: "Uchat0001" }], next: null });
+  if (url.includes("/messages")) {
+    return reply(200, {
+      list: [
+        {
+          type: "message",
+          timestamp: 1_700_000_000_000,
+          source: { chatId: "Uchat0001" },
+          message: { type: "sticker", stickerId: "52114110", stickerResourceType: "ANIMATION" },
+        },
+      ],
+      backward: null,
+    });
+  }
+  return reply(200, {});
+};
+
+test("a sticker is downloaded through the background worker, not from the page", async () => {
+  const { archive, zip, bridged } = load({ fetchImpl: stickerChat });
+
+  archive.start({ minTime: null, maxTime: null });
+  await settle(archive);
+
+  assert.equal(archive.state.phase, "done");
+  assert.equal(archive.state.files, 1);
+  assert.equal(archive.state.skipped, 0);
+  // The sticker CDN sends no CORS headers, so the page may not read the body. Only the
+  // service worker may, and this is what proves the request went there.
+  assert.deepEqual(bridged, [
+    "https://stickershop.line-scdn.net/stickershop/v1/sticker/52114110/ANDROID/sticker_animation.png",
+  ]);
+  assert.deepEqual(zip.written, [
+    "Uchat0001/stickers/52114110-sticker_animation.png",
+    "Uchat0001/data.json",
+  ]);
+});
+
+test("an attachment that will not download is skipped, and the archive is still saved", async () => {
+  const { archive, zip, clicks } = load({
+    fetchImpl: stickerChat,
+    bridgeImpl: async () => ({ ok: false, error: "TypeError: Failed to fetch" }),
+  });
+
+  archive.start({ minTime: null, maxTime: null });
+  await settle(archive);
+
+  assert.equal(archive.state.phase, "done", "one dead file must not take the archive with it");
+  assert.equal(archive.state.skipped, 1);
+  assert.equal(archive.state.files, 0);
+  assert.equal(archive.state.messages, 1, "the message is kept");
+  assert.deepEqual(zip.written, ["Uchat0001/data.json"]);
+  assert.equal(clicks.length, 1, "the zip was still handed to the browser");
+});
+
+test("a signed-out session still ends the run rather than skipping a file", async () => {
+  const { archive } = load({
+    fetchImpl: stickerChat,
+    bridgeImpl: async () => ({ ok: false, status: 401 }),
+  });
+
+  archive.start({ minTime: null, maxTime: null });
+  await settle(archive, ["failed"]);
+
+  assert.match(archive.state.error, /signed you out/);
 });
 
 test("a status that is never retried says so, and names the path that failed", async () => {

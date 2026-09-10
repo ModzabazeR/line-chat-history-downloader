@@ -6,11 +6,18 @@
   "action": {
     "default_popup": "popup/popup.html"
   },
+  "background": {
+    "service_worker": "scripts/background.js"
+  },
   "content_scripts": [
     {
       "matches": ["https://chat.line.biz/*"],
       "js": ["scripts/jszip.min.js", "scripts/downloader.js"]
     }
   ],
-  "permissions": ["tabs", "activeTab", "nativeMessaging", "scripting"]
+  "permissions": ["tabs", "activeTab", "nativeMessaging", "scripting"],
+  "host_permissions": [
+    "https://chat-content.line.biz/*",
+    "https://stickershop.line-scdn.net/*"
+  ]
 }

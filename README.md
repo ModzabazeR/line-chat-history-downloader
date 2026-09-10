@@ -41,9 +41,9 @@ opening it again shows where the run got to. **Stop** ends the run.
 
 These are inherited and are not yet fixed:
 
-- **The zip is written at the end.** A run that fails or is stopped saves nothing.
-- **Media may fail on CORS.** Chrome makes a content script's cross-origin request obey the
-  page's rules, and attachments come from a different host. Test one chat with an image first.
+- **The zip is written at the end.** A run that fails or is stopped saves nothing. One
+  attachment that will not download is no longer such a failure: it is counted as skipped and
+  the run carries on.
 - **You get chat ids, not customer names.**
 - **Only text, image, video, audio, file, sticker and flex are handled.** Other event types are
   skipped.
@@ -65,6 +65,14 @@ backoff, `Retry-After`, pacing, stopping, and the two paged endpoints.
 reports, and sends three messages back: `archive:start`, `archive:stop` and `archive:state`. The
 page broadcasts `archive:progress` as the run moves, which is why the popup can be closed and
 opened again without losing anything.
+
+`scripts/background.js` downloads the attachments. It has to: they come from
+`chat-content.line.biz` and `stickershop.line-scdn.net`, and a content script's cross-origin
+request obeys the page's CORS rules. The sticker CDN sends no CORS headers — the Chats screen
+draws stickers with `<img>`, which is exempt — so a fetch from the page fails with
+`TypeError: Failed to fetch` however many times it is tried. A service worker holding
+`host_permissions` for those two hosts may read the body, and it passes the bytes back as
+base64. It refuses any URL outside those two hosts.
 
 ## A word of care
 
