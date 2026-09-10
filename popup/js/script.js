@@ -134,8 +134,15 @@ function render(state) {
 
   drawLedger(state);
 
-  if (state.error) note(state.error, state.phase === "done" ? null : "halt");
-  else if (state.phase === "done") note(`Saved ${state.chatsDone} chats to your downloads.`, "done");
+  // A skipped attachment is worth one sentence and no alarm: the message is in the archive,
+  // and only the file behind it was not there to fetch.
+  const skipped = state.skipped
+    ? ` ${state.skipped} attachment${state.skipped === 1 ? "" : "s"} had no file to download.`
+    : "";
+
+  if (state.error) note(state.error + skipped, state.phase === "done" ? null : "halt");
+  else if (state.phase === "done")
+    note(`Saved ${state.chatsDone} chats to your downloads.${skipped}`, "done");
   else note(null);
 
   if (active && !ticker) ticker = setInterval(tick, 1000);

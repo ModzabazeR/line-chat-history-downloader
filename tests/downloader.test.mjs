@@ -275,6 +275,97 @@ test("an empty date box means no bound rather than an empty archive", async () =
   assert.equal(archive.state.messages, 1);
 });
 
+test("a flex message is fetched as JSON, never as an attachment", async () => {
+  const asked = [];
+  const { archive, zip } = load({
+    fetchImpl: async (url) => {
+      asked.push(url);
+      if (url.includes("/chats?")) {
+        return reply(200, { list: [{ chatId: "Uchat0001" }], next: null });
+      }
+      if (url.includes("/messages")) {
+        return reply(200, {
+          list: [
+            {
+              type: "message",
+              timestamp: 1_700_000_000_000,
+              source: { chatId: "Uchat0001" },
+              // A flex message carries an id and no contentHash. Grouping it with the
+              // attachments built ".../bot/<botId>/undefined", and LINE answered 400.
+              message: { type: "flex", id: "468789577898262530" },
+            },
+          ],
+          backward: null,
+        });
+      }
+      return reply(200, { contents: {} });
+    },
+  });
+
+  archive.start({ minTime: null, maxTime: null });
+  await settle(archive);
+
+  assert.equal(archive.state.phase, "done");
+  assert.ok(
+    !asked.some((url) => url.includes("undefined")),
+    `no request may contain "undefined": ${asked.join(" ")}`,
+  );
+  assert.ok(asked.some((url) => url.includes("flexJson")));
+  assert.deepEqual(zip.written, [
+    "Uchat0001/flex-messages/468789577898262530.json",
+    "Uchat0001/data.json",
+  ]);
+});
+
+test("an attachment with no content hash is kept as a message and not downloaded", async () => {
+  const asked = [];
+  const { archive, zip } = load({
+    fetchImpl: async (url) => {
+      asked.push(url);
+      if (url.includes("/chats?")) {
+        return reply(200, { list: [{ chatId: "Uchat0001" }], next: null });
+      }
+      if (url.includes("/messages")) {
+        return reply(200, {
+          list: [
+            {
+              type: "message",
+              timestamp: 1_700_000_000_000,
+              source: { chatId: "Uchat0001" },
+              message: { type: "image" }, // LINE no longer holds the file
+            },
+          ],
+          backward: null,
+        });
+      }
+      return reply(200, {});
+    },
+  });
+
+  archive.start({ minTime: null, maxTime: null });
+  await settle(archive);
+
+  assert.equal(archive.state.phase, "done");
+  assert.equal(archive.state.skipped, 1, "the popup is told one attachment was skipped");
+  assert.equal(archive.state.files, 0);
+  assert.equal(archive.state.messages, 1, "the message itself is still in the archive");
+  assert.ok(!asked.some((url) => url.includes("chat-content")), "no download was attempted");
+  assert.deepEqual(zip.written, ["Uchat0001/data.json"]);
+});
+
+test("a status that is never retried says so, and names the path that failed", async () => {
+  const { archive } = load({
+    fetchImpl: async (url) =>
+      url.includes("/chats?") ? reply(400, null) : reply(200, { list: [], backward: null }),
+  });
+
+  archive.start({ minTime: null, maxTime: null });
+  await settle(archive, ["failed"]);
+
+  assert.match(archive.state.error, /answered 400 on the first try/);
+  assert.match(archive.state.error, /\/api\/v2\/bots/);
+});
+
 test("stop ends the run quickly and says nothing was saved", async () => {
   const { archive, clicks } = load({
     fetchImpl: async (url) => {

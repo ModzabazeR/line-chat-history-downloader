@@ -35,11 +35,15 @@
   }
 
   class HttpError extends Error {
-    constructor(status, url) {
+    constructor(status, url, attempts) {
       super(`HTTP ${status}`);
       this.name = "HttpError";
       this.status = status;
       this.url = url;
+      // How many times it was actually tried. A 4xx is never retried, so a message that says
+      // "after 5 tries" when there was one sends whoever reads it looking for a flaky network
+      // instead of for the bad request they actually have.
+      this.attempts = attempts;
     }
   }
 
@@ -61,6 +65,7 @@
       chatsDone: 0,
       messages: 0,
       files: 0,
+      skipped: 0, // attachments with nothing to download; the message itself is still kept
       rows: [], // newest first: { chatId, messages, files, phase, attempt, limit }
       startedAt: null,
       finishedAt: null,
@@ -176,7 +181,7 @@
           return response;
         }
         if (!retryable(response.status) || attempt > tuning.retryLimit) {
-          throw new HttpError(response.status, url);
+          throw new HttpError(response.status, url, attempt);
         }
         await hold(attempt, response);
       } catch (error) {
@@ -210,6 +215,17 @@
 
   const json = async (url) => (await request(url)).json();
   const binary = async (url) => (await request(url)).blob();
+
+  // The failing path, short enough to read in the popup. It is what tells somebody which of
+  // the five endpoints refused them, which the status alone never does.
+  function short(url) {
+    try {
+      const { pathname } = new URL(url);
+      return pathname.length > 48 ? `…${pathname.slice(-47)}` : pathname;
+    } catch {
+      return url;
+    }
+  }
 
   // ---------------------------------------------------------------- walking
 
@@ -265,11 +281,29 @@
           return { type: "flex", id: chatId, messageId: message.id, timestamp, role };
         }
         return { type: "text", id: chatId, timestamp, content: message.text, role };
+      // A flex message is JSON and carries no content hash — it is fetched from the flexJson
+      // endpoint by message id. The original grouped it with the attachments, which built a
+      // download URL ending in "undefined" and made LINE answer 400.
       case "flex":
+        return message.id
+          ? { type: "flex", id: chatId, messageId: message.id, timestamp, role }
+          : { type: "skipped", id: chatId, timestamp, role, why: "flex message with no id" };
       case "image":
       case "file":
       case "audio":
       case "video":
+        // No hash means LINE is not holding the file any more, or never held it — one hosted
+        // somewhere else, for instance. The message is kept and the download is not attempted,
+        // because a URL built out of "undefined" is a request that cannot succeed.
+        if (!message.contentHash) {
+          return {
+            type: "skipped",
+            id: chatId,
+            timestamp,
+            role,
+            why: `${message.type} with no content hash`,
+          };
+        }
         return {
           type: "media",
           id: chatId,
@@ -305,6 +339,7 @@
       const shaped = record(event.source.chatId, event.timestamp, event.message, role);
       if (!shaped) continue;
       out.push(shaped);
+      if (shaped.type === "skipped") state.skipped += 1;
       state.messages += 1;
       if (state.rows[0]) state.rows[0].messages += 1;
       emit();
@@ -356,7 +391,7 @@
         const stickers = folder.folder("stickers");
         const flex = folder.folder("flex-messages");
 
-        for (const file of data.filter((i) => i.type === "media")) {
+        for (const file of data.filter((i) => i.type === "media" && i.media)) {
           media.file(file.fileName, await binary(`${CONTENT}/${botId}/${file.media}`));
           state.files += 1;
           row.files += 1;
@@ -422,7 +457,9 @@
         state.error = "LINE signed you out. Reload the page, sign in, and start again.";
       } else if (error instanceof HttpError) {
         state.phase = "failed";
-        state.error = `LINE answered ${error.status} after ${tuning.retryLimit} tries. Nothing was saved.`;
+        const tries = error.attempts === 1 ? "on the first try" : `after ${error.attempts} tries`;
+        state.error =
+          `LINE answered ${error.status} ${tries} for ${short(error.url)}. Nothing was saved.`;
       } else {
         state.phase = "failed";
         state.error = `${error.name}: ${error.message}. Nothing was saved.`;
