@@ -136,9 +136,14 @@ function render(state) {
 
   // A skipped attachment is worth one sentence and no alarm: the message is in the archive,
   // and only the file behind it was not there to fetch.
+  // A skip count with no reason is a number nobody can act on: a signed-out session and a
+  // dead CDN read the same. The last reason is named.
+  const why = state.lastSkip
+    ? ` Last one: ${[state.lastSkip.status, state.lastSkip.path].filter(Boolean).join(" ")}`
+    : "";
   const skipped = state.skipped
     ? ` ${state.skipped} attachment${state.skipped === 1 ? "" : "s"} could not be saved; ` +
-      `the messages holding them are still in the archive.`
+      `the messages holding them are still in the archive.${why}`
     : "";
 
   if (state.error) note(state.error + skipped, state.phase === "done" ? null : "halt");

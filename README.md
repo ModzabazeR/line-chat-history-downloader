@@ -41,9 +41,9 @@ opening it again shows where the run got to. **Stop** ends the run.
 
 These are inherited and are not yet fixed:
 
-- **The zip is written at the end.** A run that fails or is stopped saves nothing. One
-  attachment that will not download is no longer such a failure: it is counted as skipped and
-  the run carries on.
+- **The zip holds whole chats only.** A run that stops or fails still saves every chat that
+  had finished, and drops the one it was in the middle of. One attachment that will not
+  download is not a failure at all: it is counted as skipped and the run carries on.
 - **You get chat ids, not customer names.**
 - **Only text, image, video, audio, file, sticker and flex are handled.** Other event types are
   skipped.

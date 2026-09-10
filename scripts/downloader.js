@@ -66,6 +66,8 @@
       messages: 0,
       files: 0,
       skipped: 0, // attachments with nothing to download; the message itself is still kept
+      lastSkip: null, // { status, path } — why the last skip happened
+      saved: 0, // chats actually written into a zip the browser was handed
       rows: [], // newest first: { chatId, messages, files, phase, attempt, limit }
       startedAt: null,
       finishedAt: null,
@@ -188,13 +190,18 @@
     };
   }
 
-  async function request(url, init = {}) {
+  // via: "page" fetches from the tab, which carries the operator's session cookie the way the
+  // Chats screen itself does. "bridge" fetches from the service worker, which is not bound by
+  // CORS but is a cross-site request as far as cookies go, so an endpoint that wants the
+  // session may refuse it. Neither transport works everywhere, which is why the caller picks.
+  async function request(url, init = {}, { via = "auto", tries = tuning.retryLimit } = {}) {
+    const useBridge = via === "bridge" || (via === "auto" && crossOrigin(url));
     let attempt = 0;
     for (;;) {
       if (stopping) throw new Stopped();
       attempt += 1;
       try {
-        const response = crossOrigin(url)
+        const response = useBridge
           ? await bridge(url)
           : await fetch(url, {
               credentials: "include",
@@ -210,7 +217,7 @@
           await sleep(tuning.paceMs);
           return response;
         }
-        if (!retryable(response.status) || attempt > tuning.retryLimit) {
+        if (!retryable(response.status) || attempt > tries) {
           throw new HttpError(response.status, url, attempt);
         }
         await hold(attempt, response);
@@ -218,7 +225,7 @@
         if (error instanceof Stopped || error.name === "AbortError") throw new Stopped();
         if (error instanceof HttpError) throw error;
         // A network error: the tab went offline, or LINE dropped the connection.
-        if (attempt > tuning.retryLimit) throw error;
+        if (attempt > tries) throw error;
         await hold(attempt, null);
       }
     }
@@ -244,7 +251,23 @@
   }
 
   const json = async (url) => (await request(url)).json();
-  const binary = async (url) => (await request(url)).blob();
+
+  // Attachments: the page first, the service worker second.
+  //
+  // A sticker only ever works through the worker — the CDN sends no CORS headers, so the page
+  // is refused before the request leaves. An attachment is the other way round: it wants the
+  // session cookie, and the page has one while the worker's request is cross-site and may not.
+  // So the page is tried once, without the usual five retries, and the worker takes over if
+  // that fails. One dead-end attempt per file is a fair price; five would not be.
+  async function binary(url) {
+    if (url.startsWith(STICKERS)) return (await request(url, {}, { via: "bridge" })).blob();
+    try {
+      return await (await request(url, {}, { via: "page", tries: 0 })).blob();
+    } catch (error) {
+      if (error instanceof Stopped) throw error;
+      return (await request(url, {}, { via: "bridge" })).blob();
+    }
+  }
 
   // The failing path, short enough to read in the popup. It is what tells somebody which of
   // the five endpoints refused them, which the status alone never does.
@@ -434,6 +457,12 @@
             if (error instanceof Stopped) throw error;
             if (error instanceof HttpError && error.status === 401) throw error;
             state.skipped += 1;
+            // Why the last one failed. Without it, "1144 attachments could not be saved" is a
+            // number nobody can act on — a wrong session and a dead CDN read the same.
+            state.lastSkip =
+              error instanceof HttpError
+                ? { status: error.status, path: short(error.url) }
+                : { status: null, path: `${error.name}: ${error.message}` };
           }
           emit();
         };
@@ -487,26 +516,34 @@
 
       state.phase = "packing";
       emit({ now: true });
-      save(await zip.generateAsync({ type: "blob" }));
+      await keep(zip, packed);
       state.phase = "done";
       state.finishedAt = Date.now();
       emit({ now: true });
     } catch (error) {
+      // Whatever finished before this goes to disk. A run over a large account can take an
+      // hour, and throwing an hour of finished work away because the last minute of it failed
+      // — or because somebody pressed Stop — is a worse answer than a partial archive that
+      // says how partial it is. The chats already in the zip are whole.
+      const rescued = await keep(zip, packed).catch(() => 0);
+      const also = rescued
+        ? ` The ${rescued} chats finished before this were saved to your downloads.`
+        : " Nothing was saved, because no chat had finished yet.";
+
       state.finishedAt = Date.now();
       if (error instanceof Stopped) {
         state.phase = "stopped";
-        state.error = "Stopped. Nothing was saved — the zip is written at the end of the run.";
+        state.error = `Stopped.${also}`;
       } else if (error instanceof HttpError && error.status === 401) {
         state.phase = "failed";
-        state.error = "LINE signed you out. Reload the page, sign in, and start again.";
+        state.error = `LINE signed you out. Reload the page, sign in, and start again.${also}`;
       } else if (error instanceof HttpError) {
         state.phase = "failed";
         const tries = error.attempts === 1 ? "on the first try" : `after ${error.attempts} tries`;
-        state.error =
-          `LINE answered ${error.status} ${tries} for ${short(error.url)}. Nothing was saved.`;
+        state.error = `LINE answered ${error.status} ${tries} for ${short(error.url)}.${also}`;
       } else {
         state.phase = "failed";
-        state.error = `${error.name}: ${error.message}. Nothing was saved.`;
+        state.error = `${error.name}: ${error.message}.${also}`;
       }
       emit({ now: true });
     } finally {
@@ -515,6 +552,15 @@
       controller = null;
       state.retry = null;
     }
+  }
+
+  // Builds the zip and hands it to the browser, once. Returns how many chats went into it, so
+  // both the ordinary end of a run and an interrupted one can report the same number.
+  async function keep(zip, packed) {
+    if (packed === 0 || state.saved) return state.saved;
+    save(await zip.generateAsync({ type: "blob" }));
+    state.saved = packed;
+    return packed;
   }
 
   function save(archive) {

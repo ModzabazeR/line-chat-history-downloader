@@ -436,6 +436,117 @@ test("a signed-out session still ends the run rather than skipping a file", asyn
   assert.match(archive.state.error, /signed you out/);
 });
 
+// A conversation holding one image, used by the two transport tests below.
+const imageChat = (onContent) => async (url) => {
+  if (url.includes("/chats?")) return reply(200, { list: [{ chatId: "Uchat0001" }], next: null });
+  if (url.includes("/messages")) {
+    return reply(200, {
+      list: [
+        {
+          type: "message",
+          timestamp: 1_700_000_000_000,
+          source: { chatId: "Uchat0001" },
+          message: { type: "image", contentHash: "abc123" },
+        },
+      ],
+      backward: null,
+    });
+  }
+  return onContent();
+};
+
+test("an attachment is fetched by the page, and the worker is not asked", async () => {
+  let pageTries = 0;
+  const { archive, bridged, zip } = load({
+    fetchImpl: imageChat(() => {
+      pageTries += 1;
+      return reply(200, {}); // chat-content answers the page, as it does in the browser
+    }),
+  });
+
+  archive.start({ minTime: null, maxTime: null });
+  await settle(archive);
+
+  assert.equal(archive.state.files, 1);
+  assert.equal(pageTries, 1, "the page fetched it");
+  assert.deepEqual(bridged, [], "the worker was not needed, so it was not asked");
+  assert.deepEqual(zip.written, ["Uchat0001/media/abc123.jpg", "Uchat0001/data.json"]);
+});
+
+test("an attachment the page cannot read falls back to the worker after one try", async () => {
+  let pageTries = 0;
+  const { archive, bridged } = load({
+    fetchImpl: imageChat(() => {
+      pageTries += 1;
+      throw new TypeError("Failed to fetch"); // CORS
+    }),
+  });
+
+  archive.start({ minTime: null, maxTime: null });
+  await settle(archive);
+
+  assert.equal(archive.state.files, 1, "the worker got it");
+  assert.equal(pageTries, 1, "the page is tried once, not five times, before falling back");
+  assert.equal(bridged.length, 1);
+});
+
+test("stop saves the chats that had already finished", async () => {
+  let chatPages = 0;
+  const { archive, zip, clicks } = load({
+    fetchImpl: async (url) => {
+      if (url.includes("/chats?")) {
+        chatPages += 1;
+        return reply(200, { list: [{ chatId: `Uchat${chatPages}` }], next: "more" });
+      }
+      return reply(200, {
+        list: [
+          {
+            type: "message",
+            timestamp: 1_700_000_000_000,
+            source: { chatId: `Uchat${chatPages}` },
+            message: { type: "text", text: "kept" },
+          },
+        ],
+        backward: null,
+      });
+    },
+  });
+
+  archive.start({ minTime: null, maxTime: null });
+  await new Promise((r) => setTimeout(r, 40));
+  archive.stop();
+  await settle(archive, ["stopped"]);
+
+  assert.equal(archive.state.phase, "stopped");
+  assert.ok(archive.state.saved > 0, "the finished chats went to disk");
+  assert.equal(clicks.length, 1, "the browser was handed one zip");
+  assert.match(archive.state.error, /were saved to your downloads/);
+  assert.ok(
+    zip.written.includes("Uchat1/data.json"),
+    `expected the first chat in the zip, saw ${zip.written.join(", ")}`,
+  );
+});
+
+test("stop before any chat finishes says plainly that nothing was saved", async () => {
+  const { archive, clicks } = load({
+    fetchImpl: async (url) => {
+      if (url.includes("/chats?")) {
+        return reply(200, { list: [{ chatId: "Uchat0001" }], next: null });
+      }
+      await new Promise((r) => setTimeout(r, 60)); // still reading the first chat
+      return reply(200, { list: [], backward: null });
+    },
+  });
+
+  archive.start({ minTime: null, maxTime: null });
+  await new Promise((r) => setTimeout(r, 10));
+  archive.stop();
+  await settle(archive, ["stopped"]);
+
+  assert.match(archive.state.error, /Nothing was saved, because no chat had finished yet/);
+  assert.equal(clicks.length, 0);
+});
+
 test("a status that is never retried says so, and names the path that failed", async () => {
   const { archive } = load({
     fetchImpl: async (url) =>
