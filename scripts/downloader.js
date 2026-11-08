@@ -282,6 +282,22 @@
 
   // ---------------------------------------------------------------- walking
 
+  // The newest message time the chat list knows for a chat, or null when it gives none. The
+  // latest of four fields, because no one of them is documented to cover every message:
+  // updatedAt is left out, since it can fall before lastTalkedAt and so is not a ceiling.
+  function lastActivity(chat) {
+    const times = [
+      chat.lastTalkedAt,
+      chat.lastReceivedAt,
+      chat.lastSentAt,
+      chat.latestEvent?.timestamp,
+    ].filter(Number.isFinite);
+    return times.length ? Math.max(...times) : null;
+  }
+
+  // Yields who each chat is with, as the Chats screen shows it. `name` is the customer's own
+  // LINE display name; `nickname` is the label an operator set in Account Manager. Either can
+  // be missing — a chat that is not with a single user carries no profile.
   async function* walkChats(botId) {
     let next = null;
     for (;;) {
@@ -293,13 +309,22 @@
       for (const chat of page.list ?? []) {
         state.chatsFound += 1;
         emit();
-        yield chat.chatId;
+        yield {
+          chatId: chat.chatId,
+          name: chat.profile?.name ?? null,
+          nickname: chat.profile?.nickname ?? null,
+          lastActivity: lastActivity(chat),
+        };
       }
       if (!next) return;
     }
   }
 
-  async function* walkMessages(botId, chatId) {
+  // The endpoint pages from newest to oldest and takes no date. With `since`, the walk ends
+  // after the first page that holds an event older than it: every later page is older still,
+  // so reading on would fetch a chat's whole history only to throw it away. The order inside
+  // one page is not relied on — the whole crossing page is yielded and the caller filters it.
+  async function* walkMessages(botId, chatId, { since = 0 } = {}) {
     let backward = null;
     for (;;) {
       const page = await json(
@@ -307,8 +332,10 @@
           `${backward ? `&backward=${encodeURIComponent(backward)}` : ""}`,
       );
       backward = page.backward;
-      for (const event of page.list ?? []) yield event;
+      const list = page.list ?? [];
+      for (const event of list) yield event;
       if (!backward) return;
+      if (since > 0 && list.some((event) => event.timestamp < since)) return;
     }
   }
 
@@ -384,7 +411,7 @@
 
   async function collect(botId, chatId, from, to) {
     const out = [];
-    for await (const event of walkMessages(botId, chatId)) {
+    for await (const event of walkMessages(botId, chatId, { since: from })) {
       if (stopping) throw new Stopped();
       const role = event.type === "messageSent" ? "bot" : event.type === "message" ? "user" : null;
       if (!role) continue;
@@ -424,9 +451,20 @@
     let packed = 0;
 
     try {
-      for await (const chatId of walkChats(botId)) {
+      for await (const chat of walkChats(botId)) {
+        const { chatId } = chat;
         state.phase = "fetching";
-        state.rows.unshift({ chatId, messages: 0, files: 0, phase: "working" });
+
+        // Nothing in this chat can be on or after From, so its history is not read at all.
+        // It gets no ledger row: for a short range over a large account that would be
+        // thousands of rows that say nothing. It still counts as done, so the bar fills.
+        if (chat.lastActivity !== null && chat.lastActivity < from) {
+          state.chatsDone += 1;
+          emit();
+          continue;
+        }
+
+        state.rows.unshift({ chatId, name: chat.name, messages: 0, files: 0, phase: "working" });
         emit({ now: true });
 
         const data = await collect(botId, chatId, from, to);
@@ -498,6 +536,13 @@
               return rest;
             }),
           ),
+        );
+        // Who the chat is with goes in its own file, so data.json keeps the shape that
+        // anything reading it already expects. The folder stays the chat id: a name can
+        // change, can repeat, and can hold characters a file name cannot.
+        folder.file(
+          "chat.json",
+          JSON.stringify({ chatId, name: chat.name, nickname: chat.nickname }),
         );
 
         row.phase = "done";

@@ -148,7 +148,8 @@ function render(state) {
 
   if (state.error) note(state.error + skipped, state.phase === "done" ? null : "halt");
   else if (state.phase === "done")
-    note(`Saved ${state.chatsDone} chats to your downloads.${skipped}`, "done");
+    // saved, not chatsDone: chatsDone also counts the chats with nothing in the date range.
+    note(`Saved ${state.saved} chats to your downloads.${skipped}`, "done");
   else note(null);
 
   if (active && !ticker) ticker = setInterval(tick, 1000);
@@ -167,7 +168,8 @@ function drawLedger(state) {
 
       const id = document.createElement("span");
       id.className = "id";
-      id.textContent = shortId(row.chatId);
+      id.textContent = row.name || shortId(row.chatId);
+      id.title = row.chatId;
 
       const n = document.createElement("span");
       n.className = "n";

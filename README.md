@@ -32,6 +32,8 @@ opening it again shows where the run got to. **Stop** ends the run.
 
     line-archive-2026-09-10.zip
     └── <chatId>/
+        ├── chat.json          who the chat is with: chatId, name (LINE display name),
+        │                      nickname (the label an operator set in Account Manager)
         ├── data.json          every message: type, timestamp, role (user or bot), text
         ├── media/             images, video, audio and files, named by content hash
         ├── stickers/          sticker images
@@ -44,7 +46,6 @@ These are inherited and are not yet fixed:
 - **The zip holds whole chats only.** A run that stops or fails still saves every chat that
   had finished, and drops the one it was in the middle of. One attachment that will not
   download is not a failure at all: it is counted as skipped and the run carries on.
-- **You get chat ids, not customer names.**
 - **Only text, image, video, audio, file, sticker and flex are handled.** Other event types are
   skipped.
 - **LINE keeps 6 months of chat history on the free plan.** Nothing here changes that — the

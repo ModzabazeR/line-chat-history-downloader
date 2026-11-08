@@ -28,12 +28,17 @@ function reply(status, body, headers = {}) {
 
 function zipStub() {
   const written = [];
+  const contents = {};
   const folder = (path) => ({
     folder: (name) => folder(`${path}/${name}`),
-    file: (name) => written.push(`${path}/${name}`),
+    file: (name, body) => {
+      written.push(`${path}/${name}`);
+      contents[`${path}/${name}`] = body;
+    },
   });
   return {
     written,
+    contents,
     jszip: class {
       folder(name) {
         return folder(name);
@@ -204,7 +209,7 @@ test("both paged endpoints follow their cursors to the end", async () => {
   });
 
   const chats = [];
-  for await (const id of archive.walkChats("Ubot0001")) chats.push(id);
+  for await (const chat of archive.walkChats("Ubot0001")) chats.push(chat.chatId);
   assert.deepEqual(chats, ["Uc1", "Uc2", "Uc3"]);
   assert.equal(archive.state.chatsFound, 3);
 
@@ -215,6 +220,174 @@ test("both paged endpoints follow their cursors to the end", async () => {
     seen.some((url) => url.includes("limit=100")),
     "messages are read a hundred at a time",
   );
+});
+
+test("a chat stops paging once a page reaches past the From date", async () => {
+  const from = 1_700_000_000_000;
+  const message = (timestamp, text) => ({
+    type: "message",
+    timestamp,
+    source: { chatId: "Uchat0001" },
+    message: { type: "text", text },
+  });
+  const seen = [];
+  const { archive } = load({
+    fetchImpl: async (url) => {
+      if (url.includes("/chats?")) {
+        return reply(200, { list: [{ chatId: "Uchat0001" }], next: null });
+      }
+      seen.push(url);
+      if (url.includes("backward=page3")) {
+        return reply(200, { list: [message(from - 90_000, "much older")], backward: null });
+      }
+      if (url.includes("backward=page2")) {
+        // This page crosses From: one message is in range, one is not.
+        return reply(200, {
+          list: [message(from + 1_000, "edge"), message(from - 1_000, "too old")],
+          backward: "page3",
+        });
+      }
+      return reply(200, { list: [message(from + 60_000, "newest")], backward: "page2" });
+    },
+  });
+
+  archive.start({ minTime: from, maxTime: null });
+  await settle(archive);
+
+  assert.equal(archive.state.phase, "done");
+  assert.equal(archive.state.messages, 2, "the two messages on or after From are kept");
+  assert.equal(seen.length, 2, "no page older than the crossing page is requested");
+});
+
+test("a chat whose last activity is before From is skipped without reading its messages", async () => {
+  const from = 1_700_000_000_000;
+  const asked = [];
+  const { archive, zip } = load({
+    fetchImpl: async (url) => {
+      if (url.includes("/chats?")) {
+        return reply(200, {
+          list: [
+            // Old by every field the chat list gives.
+            { chatId: "Uold", lastTalkedAt: from - 5_000, latestEvent: { timestamp: from - 5_000 } },
+            // lastTalkedAt alone is old, but a newer received message shows it is not.
+            { chatId: "Umixed", lastTalkedAt: from - 5_000, lastReceivedAt: from + 5_000 },
+            // Nothing to judge by, so it must be read.
+            { chatId: "Uunknown" },
+          ],
+          next: null,
+        });
+      }
+      asked.push(url);
+      const chatId = url.match(/chats\/(\w+)\/messages/)[1];
+      return reply(200, {
+        list: [
+          {
+            type: "message",
+            timestamp: from + 1_000,
+            source: { chatId },
+            message: { type: "text", text: "hello" },
+          },
+        ],
+        backward: null,
+      });
+    },
+  });
+
+  archive.start({ minTime: from, maxTime: null });
+  await settle(archive);
+
+  assert.equal(archive.state.phase, "done");
+  assert.ok(!asked.some((url) => url.includes("/Uold/")), "the old chat's messages are not read");
+  assert.equal(asked.length, 2);
+  assert.equal(archive.state.chatsDone, 3, "the skipped chat still counts as done");
+  assert.equal(archive.state.saved, 2);
+  assert.ok(!zip.written.some((path) => path.startsWith("Uold/")));
+});
+
+test("with no From date, no chat is skipped", async () => {
+  const asked = [];
+  const { archive } = load({
+    fetchImpl: async (url) => {
+      if (url.includes("/chats?")) {
+        return reply(200, { list: [{ chatId: "Uold", lastTalkedAt: 1 }], next: null });
+      }
+      asked.push(url);
+      return reply(200, { list: [], backward: null });
+    },
+  });
+
+  archive.start({ minTime: null, maxTime: null });
+  await settle(archive);
+
+  assert.equal(asked.length, 1);
+});
+
+test("each chat folder names the customer, and the ledger shows the name", async () => {
+  const { archive, zip } = load({
+    fetchImpl: async (url) => {
+      if (url.includes("/chats?")) {
+        return reply(200, {
+          list: [
+            {
+              chatId: "Uchat0001",
+              profile: { userId: "Uchat0001", name: "Somchai", nickname: "VIP 31/12" },
+            },
+          ],
+          next: null,
+        });
+      }
+      return reply(200, {
+        list: [
+          {
+            type: "message",
+            timestamp: 1_700_000_000_000,
+            source: { chatId: "Uchat0001" },
+            message: { type: "text", text: "hello" },
+          },
+        ],
+        backward: null,
+      });
+    },
+  });
+
+  archive.start({ minTime: null, maxTime: null });
+  await settle(archive);
+
+  assert.equal(archive.state.phase, "done");
+  assert.deepEqual(JSON.parse(zip.contents["Uchat0001/chat.json"]), {
+    chatId: "Uchat0001",
+    name: "Somchai",
+    nickname: "VIP 31/12",
+  });
+  assert.equal(archive.state.rows[0].name, "Somchai");
+});
+
+test("a chat with no profile still gets a chat.json, with the name left empty", async () => {
+  const { archive, zip } = load({
+    fetchImpl: async (url) =>
+      url.includes("/chats?")
+        ? reply(200, { list: [{ chatId: "Uchat0001" }], next: null })
+        : reply(200, {
+            list: [
+              {
+                type: "message",
+                timestamp: 1_700_000_000_000,
+                source: { chatId: "Uchat0001" },
+                message: { type: "text", text: "hello" },
+              },
+            ],
+            backward: null,
+          }),
+  });
+
+  archive.start({ minTime: null, maxTime: null });
+  await settle(archive);
+
+  assert.deepEqual(JSON.parse(zip.contents["Uchat0001/chat.json"]), {
+    chatId: "Uchat0001",
+    name: null,
+    nickname: null,
+  });
 });
 
 test("a whole run packs one folder per chat and reports done", async () => {
@@ -253,7 +426,11 @@ test("a whole run packs one folder per chat and reports done", async () => {
   assert.equal(archive.state.messages, 2, "both sides of the conversation are kept");
   assert.equal(archive.state.files, 1, "the image was downloaded");
   assert.equal(archive.state.chatsDone, 1);
-  assert.deepEqual(zip.written, ["Uchat0001/media/abc123.jpg", "Uchat0001/data.json"]);
+  assert.deepEqual(zip.written, [
+    "Uchat0001/media/abc123.jpg",
+    "Uchat0001/data.json",
+    "Uchat0001/chat.json",
+  ]);
   assert.equal(clicks.length, 1, "the zip was handed to the browser once");
   assert.equal(progress.at(-1).phase, "done");
 });
@@ -329,6 +506,7 @@ test("a flex message is fetched as JSON, never as an attachment", async () => {
   assert.deepEqual(zip.written, [
     "Uchat0001/flex-messages/468789577898262530.json",
     "Uchat0001/data.json",
+    "Uchat0001/chat.json",
   ]);
 });
 
@@ -365,7 +543,7 @@ test("an attachment with no content hash is kept as a message and not downloaded
   assert.equal(archive.state.files, 0);
   assert.equal(archive.state.messages, 1, "the message itself is still in the archive");
   assert.ok(!asked.some((url) => url.includes("chat-content")), "no download was attempted");
-  assert.deepEqual(zip.written, ["Uchat0001/data.json"]);
+  assert.deepEqual(zip.written, ["Uchat0001/data.json", "Uchat0001/chat.json"]);
 });
 
 // A conversation holding one sticker, used by the two tests below.
@@ -404,6 +582,7 @@ test("a sticker is downloaded through the background worker, not from the page",
   assert.deepEqual(zip.written, [
     "Uchat0001/stickers/52114110-sticker_animation.png",
     "Uchat0001/data.json",
+    "Uchat0001/chat.json",
   ]);
 });
 
@@ -420,7 +599,7 @@ test("an attachment that will not download is skipped, and the archive is still 
   assert.equal(archive.state.skipped, 1);
   assert.equal(archive.state.files, 0);
   assert.equal(archive.state.messages, 1, "the message is kept");
-  assert.deepEqual(zip.written, ["Uchat0001/data.json"]);
+  assert.deepEqual(zip.written, ["Uchat0001/data.json", "Uchat0001/chat.json"]);
   assert.equal(clicks.length, 1, "the zip was still handed to the browser");
 });
 
@@ -470,7 +649,11 @@ test("an attachment is fetched by the page, and the worker is not asked", async 
   assert.equal(archive.state.files, 1);
   assert.equal(pageTries, 1, "the page fetched it");
   assert.deepEqual(bridged, [], "the worker was not needed, so it was not asked");
-  assert.deepEqual(zip.written, ["Uchat0001/media/abc123.jpg", "Uchat0001/data.json"]);
+  assert.deepEqual(zip.written, [
+    "Uchat0001/media/abc123.jpg",
+    "Uchat0001/data.json",
+    "Uchat0001/chat.json",
+  ]);
 });
 
 test("an attachment the page cannot read falls back to the worker after one try", async () => {
