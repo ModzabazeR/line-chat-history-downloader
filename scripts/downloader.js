@@ -22,6 +22,11 @@
     retryCeilingMs: 20_000,
     paceMs: 120,
     emitMs: 100,
+    // The chat list comes newest first by updatedAt. With a From date, the list stops after
+    // a page where every chat's updatedAt is older than From by more than this. The margin
+    // exists because updatedAt is not quite the last message: automatic replies were seen
+    // 2–12 seconds after it without moving it. A day is far wider than that.
+    listStopMarginMs: 86_400_000,
   };
 
   const CHAT_PAGE = 25; // the chats endpoint refuses more
@@ -298,15 +303,27 @@
   // Yields who each chat is with, as the Chats screen shows it. `name` is the customer's own
   // LINE display name; `nickname` is the label an operator set in Account Manager. Either can
   // be missing — a chat that is not with a single user carries no profile.
-  async function* walkChats(botId) {
+  //
+  // With `since`, the walk ends after a page that is wholly older than it, by the margin in
+  // tuning. Pinned chats are not put first, because a pinned chat sits at the top whatever
+  // its age and would break the order the stop depends on. A chat with no updatedAt keeps
+  // the walk going: there is nothing to judge it by.
+  async function* walkChats(botId, { since = 0 } = {}) {
     let next = null;
     for (;;) {
       const page = await json(
         `${API}/v2/bots/${botId}/chats?folderType=ALL&tagIds=&autoTagIds=&limit=${CHAT_PAGE}` +
-          `${next ? `&next=${encodeURIComponent(next)}` : ""}&prioritizePinnedChat=true`,
+          `${next ? `&next=${encodeURIComponent(next)}` : ""}&prioritizePinnedChat=false`,
       );
       next = page.next;
-      for (const chat of page.list ?? []) {
+      const list = page.list ?? [];
+      const cutoff = since - tuning.listStopMarginMs;
+      const pastRange =
+        since > 0 &&
+        list.length > 0 &&
+        list.every((chat) => Number.isFinite(chat.updatedAt) && chat.updatedAt < cutoff);
+      if (pastRange) next = null;
+      for (const chat of list) {
         state.chatsFound += 1;
         emit();
         yield {
@@ -451,7 +468,7 @@
     let packed = 0;
 
     try {
-      for await (const chat of walkChats(botId)) {
+      for await (const chat of walkChats(botId, { since: from })) {
         const { chatId } = chat;
         state.phase = "fetching";
 

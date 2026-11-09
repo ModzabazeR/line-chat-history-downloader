@@ -67,6 +67,17 @@ reports, and sends three messages back: `archive:start`, `archive:stop` and `arc
 page broadcasts `archive:progress` as the run moves, which is why the popup can be closed and
 opened again without losing anything.
 
+Neither endpoint takes a date, so the date range is applied in the page. A From date still
+cuts the requests in three places:
+
+- **The chat list** comes newest first by `updatedAt`. It stops after a page where every chat
+  is older than From by more than `tuning.listStopMarginMs` (one day). The margin is there
+  because automatic replies can land a few seconds after `updatedAt` without moving it.
+- **A chat** whose latest activity is before From is skipped, and its messages are not read.
+- **A chat's messages** come newest first, so paging stops at the first page older than From.
+
+The To date saves nothing: every chat is read from its newest message.
+
 `scripts/background.js` downloads the attachments. It has to: they come from
 `chat-content.line.biz` and `stickershop.line-scdn.net`, and a content script's cross-origin
 request obeys the page's CORS rules. The sticker CDN sends no CORS headers — the Chats screen

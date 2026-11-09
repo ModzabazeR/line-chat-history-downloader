@@ -259,6 +259,104 @@ test("a chat stops paging once a page reaches past the From date", async () => {
   assert.equal(seen.length, 2, "no page older than the crossing page is requested");
 });
 
+test("the chat list goes on while a page still has a chat inside the margin", async () => {
+  const from = 1_700_000_000_000;
+  const day = 86_400_000;
+  const listed = [];
+  const { archive } = load({
+    fetchImpl: async (url) => {
+      if (url.includes("/chats?")) {
+        listed.push(url);
+        if (url.includes("next=page3")) {
+          return reply(200, { list: [{ chatId: "Uc5", updatedAt: from - 9 * day }], next: null });
+        }
+        if (url.includes("next=page2")) {
+          // Older than From, but one chat is inside the margin, so the list goes on.
+          return reply(200, {
+            list: [
+              { chatId: "Uc3", updatedAt: from - 1_000 },
+              { chatId: "Uc4", updatedAt: from - 3 * day },
+            ],
+            next: "page3",
+          });
+        }
+        return reply(200, {
+          list: [
+            { chatId: "Uc1", updatedAt: from + day },
+            { chatId: "Uc2", updatedAt: from + 1_000 },
+          ],
+          next: "page2",
+        });
+      }
+      return reply(200, { list: [], backward: null });
+    },
+  });
+  archive.tuning.listStopMarginMs = day;
+
+  archive.start({ minTime: from, maxTime: null });
+  await settle(archive);
+
+  assert.equal(archive.state.phase, "done");
+  assert.equal(listed.length, 3, "page2 still had a chat inside the margin, so page3 was read");
+  assert.ok(listed.every((url) => url.includes("prioritizePinnedChat=false")));
+  assert.equal(archive.state.chatsFound, 5);
+});
+
+test("the chat list ends at the first page wholly past the margin", async () => {
+  const from = 1_700_000_000_000;
+  const day = 86_400_000;
+  const listed = [];
+  const { archive } = load({
+    fetchImpl: async (url) => {
+      if (url.includes("/chats?")) {
+        listed.push(url);
+        if (url.includes("next=page2")) {
+          return reply(200, {
+            list: [
+              { chatId: "Uc2", updatedAt: from - 2 * day },
+              { chatId: "Uc3", updatedAt: from - 3 * day },
+            ],
+            next: "page3",
+          });
+        }
+        return reply(200, { list: [{ chatId: "Uc1", updatedAt: from + day }], next: "page2" });
+      }
+      return reply(200, { list: [], backward: null });
+    },
+  });
+  archive.tuning.listStopMarginMs = day;
+
+  archive.start({ minTime: from, maxTime: null });
+  await settle(archive);
+
+  assert.equal(archive.state.phase, "done");
+  assert.equal(listed.length, 2, "page3 is never requested");
+});
+
+test("a page with a chat that has no updatedAt never ends the chat list", async () => {
+  const from = 1_700_000_000_000;
+  const listed = [];
+  const { archive } = load({
+    fetchImpl: async (url) => {
+      if (url.includes("/chats?")) {
+        listed.push(url);
+        return url.includes("next=page2")
+          ? reply(200, { list: [{ chatId: "Uc3" }], next: null })
+          : reply(200, {
+              list: [{ chatId: "Uc1", updatedAt: 1 }, { chatId: "Uc2" }],
+              next: "page2",
+            });
+      }
+      return reply(200, { list: [], backward: null });
+    },
+  });
+
+  archive.start({ minTime: from, maxTime: null });
+  await settle(archive);
+
+  assert.equal(listed.length, 2);
+});
+
 test("a chat whose last activity is before From is skipped without reading its messages", async () => {
   const from = 1_700_000_000_000;
   const asked = [];
